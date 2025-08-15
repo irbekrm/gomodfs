@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-billy/v5"
 	"github.com/tailscale/gomodfs/store"
 	"github.com/tailscale/gomodfs/temp-dev-fork/willscott/go-nfs"
+	"golang.org/x/mod/module"
 )
 
 func (fs *FS) NFSHandler() nfs.Handler {
@@ -56,6 +57,7 @@ type NFSHandler struct {
 	handle      map[handle][]string // => path segments
 	readCache   map[handle]*readCacheEntry
 	statusCache *statusMeta
+	modVerHash  map[[sha256.Size]byte]store.ModuleVersion // for NFS FromHandle
 }
 
 // statusMeta is a snapshot of the [statusFile] contents:
@@ -284,11 +286,10 @@ func (h *NFSHandler) ToHandle(fs billy.Filesystem, path []string) []byte {
 	ret := make([]byte, sha256.Size*2) // 64 bytes; max handle length w/ NFS v3
 
 	if pp.ModVersion.Module != "" {
-		s := sha256.New()
-		io.WriteString(s, pp.ModVersion.Module)
-		io.WriteString(s, pp.ModVersion.Version)
-		s.Sum(ret[:0])
+		hash := hashModVersion(pp.ModVersion)
+		copy(ret[:sha256.Size], hash[:])
 	}
+
 	if pp.CacheDownloadFileExt != "" {
 		_ = append(ret[sha256.Size:][:0], pp.CacheDownloadFileExt...)
 	} else {
@@ -335,14 +336,74 @@ func (h *NFSHandler) FromHandle(handleb []byte) (_ billy.Filesystem, segs []stri
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	pathSeg, ok := h.handle[handle]
-	if !ok {
-		log.Printf("TODO: NFS FromHandle called with unknown handle %q", handle)
-		return nil, nil, errors.New("unknown handle")
+	h.mu.Unlock()
+	if ok {
+		return h.billyFS(), slices.Clone(pathSeg), nil
 	}
-	return h.billyFS(), slices.Clone(pathSeg), nil
+
+	modVerHash := [sha256.Size]byte(handle[:sha256.Size])   // first 32 bytes are sha256(module version)
+	wantFileHash := [sha256.Size]byte(handle[sha256.Size:]) // second 32 bytes are sha256(file path)
+
+	mv, ok := h.fs.moduleVersionWithHash(modVerHash)
+	if !ok {
+		log.Printf("error mapping NFS handle %02x back to a module version", modVerHash)
+		return nil, nil, errors.New("unknown module version in handle")
+	}
+
+	ctx := context.TODO()
+	mh, err := h.fs.Store.GetZipRoot(ctx, mv)
+	if err != nil {
+		log.Printf("GetZipRoot error for %v: %v", mv, err)
+		return nil, nil, errors.New("unknown module version in handle")
+	}
+
+	var hash [sha256.Size]byte
+	for pathRes := range h.fs.walkStoreModulePaths(ctx, mh) {
+		path, err := pathRes.Value()
+		if err != nil {
+			log.Printf("error getting path from walkStoreModulePaths: %v", err)
+			break
+		}
+		s2 := sha256.New()
+		io.WriteString(s2, path)
+		s2.Sum(hash[:0])
+		if hash == wantFileHash {
+			prefix, err := modVerZipPrefix(mv)
+			if err != nil {
+				h.fs.logf("error getting zip prefix for %v: %v", mv, err)
+				break
+			}
+			segs = strings.Split(emptyPathJoin(prefix, path), "/")
+			return h.billyFS(), segs, nil
+		}
+	}
+
+	err = fmt.Errorf("didn't find matching file for NFS handle in %v", mv)
+	h.fs.logf("FromHandle: %v", err)
+	return nil, nil, err
+}
+
+func modVerZipPrefix(mv store.ModuleVersion) (string, error) {
+	modEsc, err := module.EscapePath(mv.Module)
+	if err != nil {
+		return "", err
+	}
+	verEsc, err := module.EscapeVersion(mv.Version)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s@%s", modEsc, verEsc), nil
+}
+
+func emptyPathJoin(a, b string) string {
+	if b == "" {
+		return a
+	}
+	if a == "" {
+		return b
+	}
+	return a + "/" + b
 }
 
 func (h *NFSHandler) InvalidateHandle(fs billy.Filesystem, fh []byte) error {
