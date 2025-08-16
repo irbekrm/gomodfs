@@ -476,11 +476,17 @@ func (n *NFSHandler) getFileContents(ctx context.Context, h handle, readEnd uint
 	filename, ok := n.filenameLocked(h)
 	n.mu.Unlock()
 	if !ok {
-		log.Printf("TODO: NFS FromHandle called with unknown handle %q", h)
-		return nil, nil, &nfs.NFSStatusError{
-			NFSStatus:  nfs.NFSStatusStale,
-			WrappedErr: errors.New("unknown handle"),
+		log.Printf("TODO: handle not found %v", h)
+		_, pathSegs, err := n.FromHandle(h[:])
+		if err != nil {
+			log.Printf("TODO: NFS OnNFSRead called with unknown handle %q", h)
+			return nil, nil, &nfs.NFSStatusError{
+				NFSStatus:  nfs.NFSStatusStale,
+				WrappedErr: errors.New("unknown handle"),
+			}
 		}
+		log.Printf("TODO: recovered handle %v to filepath %s", h, filename)
+		filename = filepath.Join(pathSegs...)
 	}
 
 	contents, attr, err := n.getFileContentsUncached(ctx, filename)
