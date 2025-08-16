@@ -114,6 +114,13 @@ func (fs *FS) downloadModFile(ctx context.Context, mv store.ModuleVersion) (_ []
 	ctx = context.Background() // TODO(bradfitz): make a singleflight variant that refcounts context lifetime
 
 	vi, err, _ := fs.sf.Do("download-mod:"+mv.Module+"@"+mv.Version, func() (any, error) {
+		fs.logf("[downloadModFile] START: %s@%s", mv.Module, mv.Version)
+		startTime := time.Now()
+		defer func() {
+			fs.logf("[downloadModFile] END: %s@%s (took %v, err=%v)", 
+				mv.Module, mv.Version, time.Since(startTime), err)
+		}()
+		
 		urlBase, err := fs.modURLBase(mv)
 		if err != nil {
 			return nil, err
@@ -142,6 +149,13 @@ func (fs *FS) downloadInfoFile(ctx context.Context, mv store.ModuleVersion) (_ [
 	ctx = context.Background() // TODO(bradfitz): make a singleflight variant that refcounts context lifetime
 
 	vi, err, _ := fs.sf.Do("download-info:"+mv.Module+"@"+mv.Version, func() (any, error) {
+		fs.logf("[downloadInfoFile] START: %s@%s", mv.Module, mv.Version)
+		startTime := time.Now()
+		defer func() {
+			fs.logf("[downloadInfoFile] END: %s@%s (took %v, err=%v)", 
+				mv.Module, mv.Version, time.Since(startTime), err)
+		}()
+		
 		urlBase, err := fs.modURLBase(mv)
 		if err != nil {
 			return nil, err
@@ -179,6 +193,13 @@ func (fs *FS) logf(format string, arg ...any) {
 }
 
 func (fs *FS) downloadZip(ctx context.Context, mv store.ModuleVersion) (store.ModHandle, error) {
+	fs.logf("[downloadZip] START: %s@%s", mv.Module, mv.Version)
+	startTime := time.Now()
+	defer func() {
+		fs.logf("[downloadZip] END: %s@%s (took %v)", 
+			mv.Module, mv.Version, time.Since(startTime))
+	}()
+	
 	baseURL, err := fs.modURLBase(mv)
 	if err != nil {
 		return nil, err
@@ -234,7 +255,14 @@ func (fs *FS) downloadZip(ctx context.Context, mv store.ModuleVersion) (store.Mo
 		})
 	}
 
-	return fs.Store.PutModule(ctx, mv, put)
+	fs.logf("[downloadZip] Calling Store.PutModule for %s@%s", mv.Module, mv.Version)
+	handle, err := fs.Store.PutModule(ctx, mv, put)
+	if err != nil {
+		fs.logf("[downloadZip] Store.PutModule FAILED for %s@%s: %v", mv.Module, mv.Version, err)
+		return nil, err
+	}
+	fs.logf("[downloadZip] Store.PutModule SUCCESS for %s@%s", mv.Module, mv.Version)
+	return handle, nil
 }
 
 type putFile struct {
@@ -319,6 +347,7 @@ func (fs *FS) getZipRoot(ctx context.Context, mv store.ModuleVersion) (mh store.
 	rooti, err, _ := fs.sf.Do("get-zip-root:"+mv.Module+"@"+mv.Version, func() (any, error) {
 		mh, ok := fs.getZipRootCached(mv)
 		if ok {
+			fs.logf("[getZipRoot] Found in memory cache: %s@%s", mv.Module, mv.Version)
 			return mh, nil
 		}
 
@@ -329,6 +358,7 @@ func (fs *FS) getZipRoot(ctx context.Context, mv store.ModuleVersion) (mh store.
 				return nil, fmt.Errorf("invalid tsgo version %q", mv.Version)
 			}
 			goos, goarch, commitHash := parts[1], parts[2], parts[3]
+			fs.logf("[getZipRoot] Getting Tailscale Go: %s@%s", mv.Module, mv.Version)
 			_, root, err := fs.getTailscaleGoRoot(ctx, goos, goarch, commitHash)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get Tailscale Go root for %q: %w", mv.Version, err)
@@ -339,17 +369,21 @@ func (fs *FS) getZipRoot(ctx context.Context, mv store.ModuleVersion) (mh store.
 
 		root, err := fs.Store.GetZipRoot(ctx, mv)
 		if err == nil {
+			fs.logf("[getZipRoot] Found in Store: %s@%s", mv.Module, mv.Version)
 			fs.setZipRootCache(mv, root)
 			return root, nil
 		}
 		if !errors.Is(err, store.ErrCacheMiss) {
+			fs.logf("[getZipRoot] Store error (not cache miss) for %s@%s: %v", mv.Module, mv.Version, err)
 			return nil, fmt.Errorf("failed to get zip root for %v: %w", mv, err)
 		}
 
+		fs.logf("[getZipRoot] Cache miss, downloading: %s@%s", mv.Module, mv.Version)
 		span := fs.Stats.StartSpan("get-zip-root-cache-fill")
 		root, err = fs.downloadZip(ctx, mv)
 		span.End(err)
 		if err != nil {
+			fs.logf("[getZipRoot] Download failed for %s@%s: %v", mv.Module, mv.Version, err)
 			return nil, err
 		}
 

@@ -274,6 +274,7 @@ func (h *NFSHandler) FSStat(ctx context.Context, fs billy.Filesystem, stat *nfs.
 }
 
 func (h *NFSHandler) ToHandle(fs billy.Filesystem, path []string) []byte {
+	log.Printf("ToHandle called with %v", path)
 	if len(path) == 0 {
 		return zeroHandle[:]
 	}
@@ -311,6 +312,7 @@ func (h *NFSHandler) ToHandle(fs billy.Filesystem, path []string) []byte {
 	if _, ok := h.handle[handle]; !ok {
 		h.handle[handle] = slices.Clone(path)
 	}
+	log.Printf("TO HANDLE called with %v", ret)
 	return ret
 }
 
@@ -319,7 +321,9 @@ func (h *NFSHandler) billyFS() billyFS {
 }
 
 func (h *NFSHandler) FromHandle(handleb []byte) (_ billy.Filesystem, segs []string, err error) {
+	log.Printf("FROM HANDLE called with %v", handleb)
 	sp := h.fs.Stats.StartSpan("nfs.FromHandle")
+	defer func() { log.Printf("FROM HANDLE returning segments %v", segs) }()
 	defer func() { defer sp.End(err) }()
 
 	if len(handleb) != 64 {
@@ -416,6 +420,7 @@ func (h *NFSHandler) HandleLimit() int {
 }
 
 func (n *NFSHandler) OnNFSRead(ctx context.Context, handleb []byte, offset uint64, count uint32) (*nfs.NFSReadResult, error) {
+	log.Printf("OnNFSRead called with %v", handleb)
 	if len(handleb) != 64 {
 		log.Printf("non-64-length handle %q", handleb)
 		return nil, &nfs.NFSStatusError{
