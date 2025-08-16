@@ -328,60 +328,13 @@ func (h *NFSHandler) FromHandle(handleb []byte) (_ billy.Filesystem, segs []stri
 	}
 	handle := handle(handleb)
 
-	if handle == zeroHandle {
-		return h.billyFS(), nil, nil
-	}
-	if handle == statusHandle {
-		return h.billyFS(), []string{statusFile}, nil
-	}
-
-	h.mu.Lock()
-	pathSeg, ok := h.handle[handle]
-	h.mu.Unlock()
-	if ok {
-		return h.billyFS(), slices.Clone(pathSeg), nil
-	}
-
-	modVerHash := [sha256.Size]byte(handle[:sha256.Size])   // first 32 bytes are sha256(module version)
-	wantFileHash := [sha256.Size]byte(handle[sha256.Size:]) // second 32 bytes are sha256(file path)
-
-	mv, ok := h.fs.moduleVersionWithHash(modVerHash)
-	if !ok {
-		log.Printf("error mapping NFS handle %02x back to a module version", modVerHash)
-		return nil, nil, errors.New("unknown module version in handle")
-	}
-
-	ctx := context.TODO()
-	mh, err := h.fs.Store.GetZipRoot(ctx, mv)
+	segs, err = h.resolveHandle(context.TODO(), handle)
 	if err != nil {
-		log.Printf("GetZipRoot error for %v: %v", mv, err)
-		return nil, nil, errors.New("unknown module version in handle")
+		h.fs.logf("FromHandle: %v", err)
+		return nil, nil, err
 	}
 
-	var hash [sha256.Size]byte
-	for pathRes := range h.fs.walkStoreModulePaths(ctx, mh) {
-		path, err := pathRes.Value()
-		if err != nil {
-			log.Printf("error getting path from walkStoreModulePaths: %v", err)
-			break
-		}
-		s2 := sha256.New()
-		io.WriteString(s2, path)
-		s2.Sum(hash[:0])
-		if hash == wantFileHash {
-			prefix, err := modVerZipPrefix(mv)
-			if err != nil {
-				h.fs.logf("error getting zip prefix for %v: %v", mv, err)
-				break
-			}
-			segs = strings.Split(emptyPathJoin(prefix, path), "/")
-			return h.billyFS(), segs, nil
-		}
-	}
-
-	err = fmt.Errorf("didn't find matching file for NFS handle in %v", mv)
-	h.fs.logf("FromHandle: %v", err)
-	return nil, nil, err
+	return h.billyFS(), segs, nil
 }
 
 func modVerZipPrefix(mv store.ModuleVersion) (string, error) {
@@ -464,6 +417,64 @@ func (n *NFSHandler) filenameLocked(h handle) (string, bool) {
 	return strings.Join(pathSeg, "/"), true
 }
 
+func (h *NFSHandler) resolveHandle(ctx context.Context, fileHandle handle) ([]string, error) {
+	if fileHandle == zeroHandle {
+		return nil, nil
+	}
+	if fileHandle == statusHandle {
+		return []string{statusFile}, nil
+	}
+
+	h.mu.Lock()
+	if pathSeg, ok := h.handle[fileHandle]; ok {
+		h.mu.Unlock()
+		return slices.Clone(pathSeg), nil
+	}
+	h.mu.Unlock()
+
+	modVerHash := [sha256.Size]byte(fileHandle[:sha256.Size])
+	wantFileHash := [sha256.Size]byte(fileHandle[sha256.Size:])
+
+	mv, ok := h.fs.moduleVersionWithHash(modVerHash)
+	if !ok {
+		return nil, fmt.Errorf("unknown module version in handle %02x", modVerHash)
+	}
+
+	mh, err := h.fs.Store.GetZipRoot(ctx, mv)
+	if err != nil {
+		return nil, fmt.Errorf("GetZipRoot error for %v: %w", mv, err)
+	}
+
+	var hash [sha256.Size]byte
+	for pathRes := range h.fs.walkStoreModulePaths(ctx, mh) {
+		path, err := pathRes.Value()
+		if err != nil {
+			continue
+		}
+		s2 := sha256.New()
+		io.WriteString(s2, path)
+		s2.Sum(hash[:0])
+		if hash == wantFileHash {
+			prefix, err := modVerZipPrefix(mv)
+			if err != nil {
+				return nil, fmt.Errorf("error getting zip prefix for %v: %w", mv, err)
+			}
+			segs := strings.Split(emptyPathJoin(prefix, path), "/")
+
+			h.mu.Lock()
+			if h.handle == nil {
+				h.handle = make(map[handle][]string)
+			}
+			h.handle[fileHandle] = segs
+			h.mu.Unlock()
+
+			return segs, nil
+		}
+	}
+
+	return nil, fmt.Errorf("didn't find matching file for NFS handle in %v", mv)
+}
+
 func (n *NFSHandler) getFileContents(ctx context.Context, h handle, readEnd uint64) ([]byte, *nfs.FileAttribute, error) {
 	n.mu.Lock()
 	ent, ok := n.readCache[h]
@@ -475,12 +486,16 @@ func (n *NFSHandler) getFileContents(ctx context.Context, h handle, readEnd uint
 
 	filename, ok := n.filenameLocked(h)
 	n.mu.Unlock()
+
 	if !ok {
-		log.Printf("TODO: NFS FromHandle called with unknown handle %q", h)
-		return nil, nil, &nfs.NFSStatusError{
-			NFSStatus:  nfs.NFSStatusStale,
-			WrappedErr: errors.New("unknown handle"),
+		segs, err := n.resolveHandle(ctx, h)
+		if err != nil {
+			return nil, nil, &nfs.NFSStatusError{
+				NFSStatus:  nfs.NFSStatusStale,
+				WrappedErr: fmt.Errorf("unknown handle: %w", err),
+			}
 		}
+		filename = strings.Join(segs, "/")
 	}
 
 	contents, attr, err := n.getFileContentsUncached(ctx, filename)
