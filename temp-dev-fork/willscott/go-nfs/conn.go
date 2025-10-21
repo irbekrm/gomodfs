@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 
 	xdr2 "github.com/rasky/go-xdr/xdr2"
@@ -127,6 +128,7 @@ func (c *conn) handle(ctx context.Context, w *response) error {
 		return drainErr
 	}
 	if appError != nil && !w.responded {
+		log.Printf("handle: got appError %v with request %s", appError, w.req)
 		if err := c.err(ctx, w, appError); err != nil {
 			return err
 		}
@@ -171,12 +173,20 @@ type request struct {
 }
 
 func (r *request) String() string {
+	rr, ok := r.Body.(*io.LimitedReader)
+	var msg string
 	if r.Header.Prog == nfsServiceID {
-		return fmt.Sprintf("RPC #%d (nfs.%s)", r.xid, NFSProcedure(r.Header.Proc))
+		msg = fmt.Sprintf("RPC #%d (nfs.%s)", r.xid, NFSProcedure(r.Header.Proc))
 	} else if r.Header.Prog == mountServiceID {
-		return fmt.Sprintf("RPC #%d (mount.%s)", r.xid, MountProcedure(r.Header.Proc))
+		msg = fmt.Sprintf("RPC #%d (mount.%s)", r.xid, MountProcedure(r.Header.Proc))
+	} else {
+		msg = fmt.Sprintf("RPC #%d (%d.%d)", r.xid, r.Header.Prog, r.Header.Proc)
+
 	}
-	return fmt.Sprintf("RPC #%d (%d.%d)", r.xid, r.Header.Prog, r.Header.Proc)
+	if ok {
+		msg += fmt.Sprintf(" length %d", rr.N)
+	}
+	return msg
 }
 
 type response struct {
@@ -286,7 +296,7 @@ func (c *conn) readRequestHeader(ctx context.Context, reader *bufio.Reader) (w *
 		return nil, err
 	}
 	if fragment&(1<<31) == 0 {
-		Log.Warnf("Warning: haven't implemented fragment reconstruction.\n")
+		log.Print("Warning: haven't implemented fragment reconstruction.\n")
 		return nil, ErrInputInvalid
 	}
 	reqLen := fragment - uint32(1<<31)
@@ -300,6 +310,7 @@ func (c *conn) readRequestHeader(ctx context.Context, reader *bufio.Reader) (w *
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("Request: XID %d %v with length %d", xid, xid, reqLen)
 	reqType, err := xdr.ReadUint32(&r)
 	if err != nil {
 		return nil, err

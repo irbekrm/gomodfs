@@ -33,8 +33,12 @@ func ReadOpaque(r io.Reader) ([]byte, error) {
 	}
 
 	buf := make([]byte, length)
-	if _, err = r.Read(buf); err != nil {
+	n, err := r.Read(buf)
+	if err != nil {
 		return nil, err
+	}
+	if uint32(n) != length {
+		log.Printf("WARNING: handle length is %d, but read %d bytes %x", length, n, buf)
 	}
 	return buf, nil
 }
